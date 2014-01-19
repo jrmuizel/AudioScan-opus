@@ -14,6 +14,7 @@ include/mp3.h
 include/mp4.h
 include/mpc.h
 include/ogg.h
+include/opus.h
 include/pinttypes.h
 include/ppport.h
 include/pstdint.h
@@ -44,6 +45,7 @@ src/mp3.c
 src/mp4.c
 src/mpc.c
 src/ogg.c
+src/opus.c
 src/wav.c
 src/wavpack.c
 t/01use.t
@@ -54,6 +56,7 @@ t/04critic.t
 t/mp3.t
 t/flac.t
 t/ogg.t
+t/opus.t
 t/asf.t
 t/wav.t
 t/wavpack.t
