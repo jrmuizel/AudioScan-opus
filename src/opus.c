@@ -227,7 +227,7 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
 
 	// Verify 'OpusHead' string
 	if ( strncmp( buffer_ptr(&vorbis_buf), "pusHead", 7 ) ) {
-	  PerlIO_printf(PerlIO_stderr(), "Not an Opus file (bad opus header): %s %s\n", file, buffer_ptr(&vorbis_buf));
+	  PerlIO_printf(PerlIO_stderr(), "Not an Opus file (bad opus header): %s\n", file);
 	  goto out;
 	}
 	buffer_consume( &vorbis_buf, 7 );
