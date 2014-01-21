@@ -27,6 +27,7 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
 {
   Buffer ogg_buf, vorbis_buf;
   unsigned char *bptr;
+  unsigned char *last_bptr;
   unsigned int buf_size;
 
   unsigned int id3_size = 0; // size of leading ID3 data
@@ -50,7 +51,7 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
   unsigned char channels;
   unsigned int avg_buf_size;
   unsigned int samplerate = 0;
-  unsigned int preskip;
+  unsigned int preskip = 0;
   unsigned int input_samplerate = 0;
   //unsigned int bitrate_nominal = 0;
   uint64_t granule_pos = 0;
@@ -215,7 +216,13 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
     TOC_byte = buffer_get_char(&vorbis_buf);
     if ( TOC_byte == 'O' ) {
       if ( strncmp( buffer_ptr(&vorbis_buf), "pusTags", 7 ) == 0) {
-	DEBUG_TRACE("  Found Opus tags TOC packet type\n");
+        buffer_consume(&vorbis_buf, 7);
+        DEBUG_TRACE("  Found Opus tags TOC packet type\n");
+        _parse_vorbis_comments(infile, &vorbis_buf, tags, 0);
+
+        DEBUG_TRACE("  parsed vorbis comments\n");
+
+        buffer_clear(&vorbis_buf);
       } else {
 
 	// Verify 'OpusHead' string
@@ -250,11 +257,6 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
 	input_samplerate = CONVERT_INT32LE((opushdr+4));
 	my_hv_store( info, "input_samplerate", newSViv(input_samplerate) );
 
-#if 0
-	blocksize_0 = 2 << ((vorbishdr[21] & 0xF0) >> 4);
-	my_hv_store( info, "blocksize_0", newSViv( blocksize_0 ) );
-	my_hv_store( info, "blocksize_1", newSViv( 2 << (vorbishdr[21] & 0x0F) ) );
-#endif
 	DEBUG_TRACE("  parsed opus info header\n");
       }
       buffer_clear(&vorbis_buf);
@@ -305,32 +307,37 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
 
   // Find sync
   bptr = (unsigned char *)buffer_ptr(&ogg_buf);
+  last_bptr = bptr;
   buf_size = buffer_len(&ogg_buf);
-  while (
-    buf_size >= 14
-    && (bptr[0] != 'O' || bptr[1] != 'g' || bptr[2] != 'g' || bptr[3] != 'S')
-  ) {
-    bptr++;
-    buf_size--;
+  while (buf_size >= 14) {
+    if (bptr[0] == 'O' && bptr[1] == 'g' && bptr[2] == 'g' && bptr[3] == 'S') {
+      bptr += 6;
 
-    if ( buf_size < 14 ) {
-      // Give up, use less accurate bitrate for length
-      DEBUG_TRACE("buf_size %d, using less accurate bitrate for length\n", buf_size);
+      // Get absolute granule value
+      granule_pos = (uint64_t)CONVERT_INT32LE(bptr);
+      bptr += 4;
+      granule_pos |= (uint64_t)CONVERT_INT32LE(bptr) << 32;
+      bptr += 4;
+      //XXX: jump the header size
+      last_bptr = bptr;
+    } else {
+      bptr++;
+      buf_size--;
+#if 0
+      if ( buf_size < 14 ) {
+        // Give up, use less accurate bitrate for length
+        DEBUG_TRACE("buf_size %d, using less accurate bitrate for length\n", buf_size);
 #if 0 
-      //XXX: how should be handle this case?
-      my_hv_store( info, "song_length_ms", newSVpvf( "%d", (int)((audio_size * 8) / bitrate_nominal) * 1000) );
-      my_hv_store( info, "bitrate_average", newSViv(bitrate_nominal) );
+        //XXX: how should be handle this case?
+        my_hv_store( info, "song_length_ms", newSVpvf( "%d", (int)((audio_size * 8) / bitrate_nominal) * 1000) );
+        my_hv_store( info, "bitrate_average", newSViv(bitrate_nominal) );
 #endif
-      goto out;
+        goto out;
+      }
+#endif
     }
   }
-  bptr += 6;
-
-  // Get absolute granule value
-  granule_pos = (uint64_t)CONVERT_INT32LE(bptr);
-  bptr += 4;
-  granule_pos |= (uint64_t)CONVERT_INT32LE(bptr) << 32;
-  bptr += 4;
+  bptr = last_bptr;
   
   // Get serial number of this page, if the serial doesn't match the beginning of the file
   // we have changed logical bitstreams and can't use the granule_pos for bitrate
@@ -338,7 +345,7 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
 
   if ( granule_pos && samplerate && serialno == final_serialno ) {
     // XXX: needs to adjust for initial granule value if file does not start at 0 samples
-    int length = (int)((granule_pos * 1.0 / samplerate) * 1000);
+    int length = (int)(((granule_pos-preskip) * 1.0 / samplerate) * 1000);
     my_hv_store( info, "song_length_ms", newSVuv(length) );
     my_hv_store( info, "bitrate_average", newSVuv( _bitrate(audio_size, length) ) );
     
