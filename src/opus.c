@@ -292,7 +292,8 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
     bptr = (unsigned char *)buffer_ptr(&ogg_buf);
     last_bptr = bptr;
     buf_size = buffer_len(&ogg_buf);
-    while (buf_size >= 14) {
+    // make sure we have room for at least the one ogg page header
+    while (buf_size >= 28) {
       if (bptr[0] == 'O' && bptr[1] == 'g' && bptr[2] == 'g' && bptr[3] == 'S') {
         bptr += 6;
 
