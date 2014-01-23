@@ -53,7 +53,6 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
   unsigned int samplerate = 0;
   unsigned int preskip = 0;
   unsigned int input_samplerate = 0;
-  //unsigned int bitrate_nominal = 0;
   uint64_t granule_pos = 0;
   
   unsigned char TOC_byte = 0;
