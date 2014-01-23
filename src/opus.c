@@ -35,6 +35,7 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
   off_t file_size;           // total file size
   off_t audio_size;          // total size of audio without tags
   off_t audio_offset = 0;    // offset to audio
+  off_t seek_position;
   
   unsigned char ogghdr[28];
   char header_type;
@@ -49,7 +50,6 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
   
   unsigned char opushdr[11];
   unsigned char channels;
-  unsigned int avg_buf_size;
   unsigned int samplerate = 0;
   unsigned int preskip = 0;
   unsigned int input_samplerate = 0;
@@ -154,23 +154,6 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
     DEBUG_TRACE("OggS page %d / packet %d at %d\n", pagenum, packets, (int)(audio_offset - 28));
     DEBUG_TRACE("  granule_pos: %llu\n", granule_pos);
     
-    // If the granule_pos > 0, we have reached the end of headers and
-    // this is the first audio page
-    if (granule_pos > 0 && granule_pos != -1) {
-      // If seeking, don't waste time on comments
-      if (seeking) {
-        break;
-      }
-      
-      _parse_vorbis_comments(infile, &vorbis_buf, tags, 1);
-
-      DEBUG_TRACE("  parsed vorbis comments\n");
-
-      buffer_clear(&vorbis_buf);
-      
-      break;
-    }
-    
     // Number of page segments
     num_segments = ogghdr[26];
     
@@ -218,8 +201,9 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
       if ( strncmp( buffer_ptr(&vorbis_buf), "pusTags", 7 ) == 0) {
         buffer_consume(&vorbis_buf, 7);
         DEBUG_TRACE("  Found Opus tags TOC packet type\n");
-        _parse_vorbis_comments(infile, &vorbis_buf, tags, 0);
-
+	if ( !seeking ) {
+          _parse_vorbis_comments(infile, &vorbis_buf, tags, 0);
+	}
         DEBUG_TRACE("  parsed vorbis comments\n");
 
         buffer_clear(&vorbis_buf);
@@ -280,94 +264,72 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
   
   my_hv_store( info, "serial_number", newSVuv(serialno) );
   DEBUG_TRACE("serial number\n");
- 
-  // jrmuizel: we don't have a blocksize
-  avg_buf_size = 8500; // from vlc
-  // calculate average bitrate and duration
-  if ( file_size > avg_buf_size ) {
-    DEBUG_TRACE("Seeking to %d to calculate bitrate/duration\n", (int)(file_size - avg_buf_size));
-    PerlIO_seek(infile, file_size - avg_buf_size, SEEK_SET);
-  }
-  else {
-    DEBUG_TRACE("Seeking to %d to calculate bitrate/duration\n", (int)audio_offset);
-    PerlIO_seek(infile, audio_offset, SEEK_SET);
-  }
-
-  if ( PerlIO_read(infile, buffer_append_space(&ogg_buf, avg_buf_size), avg_buf_size) == 0 ) {
-    if ( PerlIO_error(infile) ) {
-      PerlIO_printf(PerlIO_stderr(), "Error reading: %s\n", strerror(errno));
-    }
-    else {
-      PerlIO_printf(PerlIO_stderr(), "File too small. Probably corrupted.\n");
+#define BUF_SIZE 8500 // from vlc
+  seek_position = file_size - BUF_SIZE;
+  while (1) {
+    if ( seek_position < audio_offset ) {
+      seek_position = audio_offset;
     }
 
-    err = -1;
-    goto out;
-  }
+    // calculate average bitrate and duration
+    DEBUG_TRACE("Seeking to %d to calculate bitrate/duration\n", (int)seek_position);
+    PerlIO_seek(infile, seek_position, SEEK_SET);
 
-  // Find sync
-  bptr = (unsigned char *)buffer_ptr(&ogg_buf);
-  last_bptr = bptr;
-  buf_size = buffer_len(&ogg_buf);
-  while (buf_size >= 14) {
-    if (bptr[0] == 'O' && bptr[1] == 'g' && bptr[2] == 'g' && bptr[3] == 'S') {
-      bptr += 6;
-
-      // Get absolute granule value
-      granule_pos = (uint64_t)CONVERT_INT32LE(bptr);
-      bptr += 4;
-      granule_pos |= (uint64_t)CONVERT_INT32LE(bptr) << 32;
-      bptr += 4;
-      //XXX: jump the header size
-      last_bptr = bptr;
-    } else {
-      bptr++;
-      buf_size--;
-#if 0
-      if ( buf_size < 14 ) {
-        // Give up, use less accurate bitrate for length
-        DEBUG_TRACE("buf_size %d, using less accurate bitrate for length\n", buf_size);
-#if 0 
-        //XXX: how should be handle this case?
-        my_hv_store( info, "song_length_ms", newSVpvf( "%d", (int)((audio_size * 8) / bitrate_nominal) * 1000) );
-        my_hv_store( info, "bitrate_average", newSViv(bitrate_nominal) );
-#endif
-        goto out;
+    // XXX: what if there isn't BUF_SIZE of the file?
+    if ( PerlIO_read(infile, buffer_append_space(&ogg_buf, BUF_SIZE), BUF_SIZE) == 0 ) {
+      if ( PerlIO_error(infile) ) {
+        PerlIO_printf(PerlIO_stderr(), "Error reading: %s\n", strerror(errno));
       }
-#endif
+      else {
+        PerlIO_printf(PerlIO_stderr(), "File too small. Probably corrupted.\n");
+      }
+
+      err = -1;
+      goto out;
     }
-  }
-  bptr = last_bptr;
-  
-  // Get serial number of this page, if the serial doesn't match the beginning of the file
-  // we have changed logical bitstreams and can't use the granule_pos for bitrate
-  final_serialno = CONVERT_INT32LE((bptr));
 
-  if ( granule_pos && samplerate && serialno == final_serialno ) {
-    // XXX: needs to adjust for initial granule value if file does not start at 0 samples
-    int length = (int)(((granule_pos-preskip) * 1.0 / samplerate) * 1000);
-    my_hv_store( info, "song_length_ms", newSVuv(length) );
-    my_hv_store( info, "bitrate_average", newSVuv( _bitrate(audio_size, length) ) );
-    
-    DEBUG_TRACE("Using granule_pos %llu / samplerate %d to calculate bitrate/duration\n", granule_pos, samplerate);
-  }
-#if 0
-  else {
-    // Use nominal bitrate
-    my_hv_store( info, "song_length_ms", newSVpvf( "%d", (int)((audio_size * 8) / bitrate_nominal) * 1000) );
-    my_hv_store( info, "bitrate_average", newSVuv(bitrate_nominal) );
-    
-    DEBUG_TRACE("Using nominal bitrate for average\n");
-  }
+    // Find sync
+    bptr = (unsigned char *)buffer_ptr(&ogg_buf);
+    last_bptr = bptr;
+    buf_size = buffer_len(&ogg_buf);
+    while (buf_size >= 14) {
+      if (bptr[0] == 'O' && bptr[1] == 'g' && bptr[2] == 'g' && bptr[3] == 'S') {
+        bptr += 6;
 
-    DEBUG_TRACE("Using nominal bitrate for average %d %d\n", audio_size, bitrate_nominal);
-    // Use nominal bitrate
-    my_hv_store( info, "song_length_ms", newSVpvf( "%d", (int)((audio_size * 8) / bitrate_nominal) * 1000) );
-    DEBUG_TRACE("Using nominal for average %d %d\n", audio_size, bitrate_nominal);
-    my_hv_store( info, "bitrate_average", newSVuv(bitrate_nominal) );
-    
-    DEBUG_TRACE("Using nominal bitrate for average\n");
-#endif
+        // Get absolute granule value
+        granule_pos = (uint64_t)CONVERT_INT32LE(bptr);
+        bptr += 4;
+        granule_pos |= (uint64_t)CONVERT_INT32LE(bptr) << 32;
+        bptr += 4;
+        DEBUG_TRACE("found granule_pos %llu / samplerate %d to calculate bitrate/duration\n", granule_pos, samplerate);
+        //XXX: jump the header size
+        last_bptr = bptr;
+      } else {
+        bptr++;
+        buf_size--;
+      }
+    }
+    bptr = last_bptr;
+
+    // Get serial number of this page, if the serial doesn't match the beginning of the file
+    // we have changed logical bitstreams and can't use the granule_pos for bitrate
+    final_serialno = CONVERT_INT32LE((bptr));
+
+    if ( granule_pos && samplerate && serialno == final_serialno ) {
+      // XXX: needs to adjust for initial granule value if file does not start at 0 samples
+      int length = (int)(((granule_pos-preskip) * 1.0 / samplerate) * 1000);
+      my_hv_store( info, "song_length_ms", newSVuv(length) );
+      my_hv_store( info, "bitrate_average", newSVuv( _bitrate(audio_size, length) ) );
+
+      DEBUG_TRACE("Using granule_pos %llu / samplerate %d to calculate bitrate/duration\n", granule_pos, samplerate);
+      break;
+    }
+    if ( seek_position == audio_offset ) {
+      DEBUG_TRACE("Packet not found we won't be able to determine the length\n");
+      break;
+    }
+    seek_position -= BUF_SIZE;
+  }
 out:
   buffer_free(&ogg_buf);
   buffer_free(&vorbis_buf);
