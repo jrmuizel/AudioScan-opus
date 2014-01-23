@@ -22,6 +22,7 @@ get_opus_metadata(PerlIO *infile, char *file, HV *info, HV *tags)
   return _opus_parse(infile, file, info, tags, 0);
 }
 
+#define OGG_HEADER_SIZE 28
 int
 _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
 {
@@ -37,7 +38,7 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
   off_t audio_offset = 0;    // offset to audio
   off_t seek_position;
   
-  unsigned char ogghdr[28];
+  unsigned char ogghdr[OGG_HEADER_SIZE];
   char header_type;
   int serialno;
   int final_serialno;
@@ -97,14 +98,14 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
   
   while (1) {
     // Grab 28-byte Ogg header
-    if ( !_check_buf(infile, &ogg_buf, 28, OGG_BLOCK_SIZE) ) {
+    if ( !_check_buf(infile, &ogg_buf, OGG_HEADER_SIZE, OGG_BLOCK_SIZE) ) {
       err = -1;
       goto out;
     }
     
-    buffer_get(&ogg_buf, ogghdr, 28);
+    buffer_get(&ogg_buf, ogghdr, OGG_HEADER_SIZE);
     
-    audio_offset += 28;
+    audio_offset += OGG_HEADER_SIZE;
     
     // check that the first four bytes are 'OggS'
     if ( ogghdr[0] != 'O' || ogghdr[1] != 'g' || ogghdr[2] != 'g' || ogghdr[3] != 'S' ) {
@@ -274,8 +275,8 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
     DEBUG_TRACE("Seeking to %d to calculate bitrate/duration\n", (int)seek_position);
     PerlIO_seek(infile, seek_position, SEEK_SET);
 
-    // XXX: what if there isn't BUF_SIZE of the file?
-    if ( PerlIO_read(infile, buffer_append_space(&ogg_buf, BUF_SIZE), BUF_SIZE) == 0 ) {
+    buf_size = PerlIO_read(infile, buffer_append_space(&ogg_buf, BUF_SIZE), BUF_SIZE);
+    if ( buf_size == 0 ) {
       if ( PerlIO_error(infile) ) {
         PerlIO_printf(PerlIO_stderr(), "Error reading: %s\n", strerror(errno));
       }
@@ -290,9 +291,8 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
     // Find sync
     bptr = (unsigned char *)buffer_ptr(&ogg_buf);
     last_bptr = bptr;
-    buf_size = buffer_len(&ogg_buf);
     // make sure we have room for at least the one ogg page header
-    while (buf_size >= 28) {
+    while (buf_size >= OGG_HEADER_SIZE) {
       if (bptr[0] == 'O' && bptr[1] == 'g' && bptr[2] == 'g' && bptr[3] == 'S') {
         bptr += 6;
 
@@ -328,7 +328,9 @@ _opus_parse(PerlIO *infile, char *file, HV *info, HV *tags, uint8_t seeking)
       DEBUG_TRACE("Packet not found we won't be able to determine the length\n");
       break;
     }
-    seek_position -= BUF_SIZE;
+    // seek backwards by BUF_SIZE - OGG_HEADER_SIZE so that if our previous sync happened to include the end
+    // of page header we will include it in the next read
+    seek_position -= (BUF_SIZE - OGG_HEADER_SIZE);
   }
 out:
   buffer_free(&ogg_buf);
